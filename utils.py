@@ -234,7 +234,15 @@ def _write_results(dir_path, img_path, boxes, scores, labels, class_idx_map, inp
     _write_txt(os.path.join(dir_path, image_name + '.txt'), boxes=boxes, scores=scores, labels=labels,
                class_idx_map=class_idx_map, ws=ws, hs=hs)
 
+def read_txt(txt_path):
+    f_read = open(txt_path, 'r')
+    lines = f_read.readlines()
 
+    out = list()
+    for line in lines:
+        out.append(line.rstrip())
+
+    return out
 
 
 

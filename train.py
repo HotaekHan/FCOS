@@ -14,7 +14,9 @@ from torch import autograd
 
 # 3rd-party utils
 from torch.utils.tensorboard import SummaryWriter
-import warmup_scheduler as lr_warmup
+# import warmup_scheduler as lr_warmup
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 # user-defined
 from loss import FocalLoss
@@ -41,9 +43,9 @@ else:
     shutil.copy(opt.config, os.path.join(config['model']['exp_path'], 'config.yaml'))
 
 # set random seed
-random.seed(config['hyperparameters']['random_seed'])
-np.random.seed(config['hyperparameters']['random_seed'])
-torch.manual_seed(config['hyperparameters']['random_seed'])
+random.seed(config['params']['random_seed'])
+np.random.seed(config['params']['random_seed'])
+torch.manual_seed(config['params']['random_seed'])
 
 # variables
 best_valid_loss = float('inf')
@@ -71,39 +73,79 @@ summary_writer = SummaryWriter(os.path.join(config['model']['exp_path'], 'log'))
 
 # Data
 print('==> Preparing data..')
-transform = transforms.Compose([
-    transforms.ToTensor()
-])
-
-target_classes = config['hyperparameters']['classes'].split('|')
-img_size = config['hyperparameters']['image_size'].split('x')
+target_classes = utils.read_txt(config['params']['classes'])
+num_classes = len(target_classes)
+img_size = config['params']['image_size'].split('x')
 img_size = (int(img_size[0]), int(img_size[1]))
 
+bbox_params = A.BboxParams(format='pascal_voc', min_visibility=0.3)
+train_transforms = A.Compose([
+    A.Resize(height=img_size[0], width=img_size[1], p=1.0),
+    A.HorizontalFlip(p=0.5),
+    # A.OneOf([
+    #     A.Sequential([
+    #         A.Resize(height=img_size[0], width=img_size[1], p=1.0),
+    #     ], p=1.0),
+    #     A.Sequential([
+    #         A.RandomSizedBBoxSafeCrop(height=img_size[0], width=img_size[1], p=1.0),
+    #     ], p=1.0)
+    # ], p=1.0),
+
+    A.OneOf([
+        A.Sequential([
+            A.GaussNoise(var_limit=(100, 150), p=0.5),
+            A.MotionBlur(blur_limit=17, p=0.5)
+        ], p=1.0),
+        A.Sequential([
+            A.GaussNoise(var_limit=(100, 150), p=0.5),
+            A.MotionBlur(blur_limit=17, p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+            A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=0, p=0.5),
+        ], p=1.0),
+        A.Sequential([
+            A.GaussNoise(var_limit=(100, 150), p=0.5),
+            A.MotionBlur(blur_limit=17, p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+            A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=0, p=0.5),
+            A.ChannelShuffle(p=0.5),
+            # A.ShiftScaleRotate(shift_limit=0.1, scale_limit=(-0.15, 0.15), rotate_limit=30, p=0.5,
+            #                    border_mode=cv2.BORDER_CONSTANT, value=0),
+        ], p=1.0)
+    ], p=1.0),
+
+    A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, p=1.0),
+    ToTensorV2()
+], bbox_params=bbox_params, p=1.0)
+valid_transforms = A.Compose([
+    A.Resize(height=img_size[0], width=img_size[1], p=1.0),
+    A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, p=1.0),
+    ToTensorV2()
+], bbox_params=bbox_params, p=1.0)
+
 train_dataset = jsonDataset(path=config['data']['train'].split(' ')[0], classes=target_classes,
-                            transform=transform,
+                            transform=train_transforms,
                             input_image_size=img_size,
-                            num_crops=config['hyperparameters']['num_crops'],
-                            is_norm_reg_target=config['hyperparameters']['norm_reg_target'],
+                            num_crops=config['params']['num_crops'],
+                            is_norm_reg_target=config['params']['norm_reg_target'],
                             fpn_level=5,
-                            radius=float(config['hyperparameters']['radius']),
-                            do_aug=config['hyperparameters']['do_aug'])
+                            radius=float(config['params']['radius']))
 
 valid_dataset = jsonDataset(path=config['data']['valid'].split(' ')[0], classes=target_classes,
-                            transform=transform,
+                            transform=valid_transforms,
                             input_image_size=img_size,
-                            num_crops=config['hyperparameters']['num_crops'],
-                            is_norm_reg_target=config['hyperparameters']['norm_reg_target'],
+                            num_crops=config['params']['num_crops'],
+                            is_norm_reg_target=config['params']['norm_reg_target'],
                             fpn_level=5,
-                            radius=float(config['hyperparameters']['radius']))
+                            radius=float(config['params']['radius']))
 
 train_loader = torch.utils.data.DataLoader(
-    train_dataset, batch_size=config['hyperparameters']['batch_size'],
-    shuffle=True, num_workers=config['hyperparameters']['data_worker'],
+    train_dataset, batch_size=config['params']['batch_size'],
+    shuffle=True, num_workers=config['params']['data_worker'],
     collate_fn=train_dataset.collate_fn,
     pin_memory=True)
 valid_loader = torch.utils.data.DataLoader(
-    valid_dataset, batch_size=config['hyperparameters']['batch_size'],
-    shuffle=False, num_workers=config['hyperparameters']['data_worker'],
+    valid_dataset, batch_size=config['params']['batch_size'],
+    shuffle=False, num_workers=config['params']['data_worker'],
     collate_fn=valid_dataset.collate_fn,
     pin_memory=True)
 
@@ -111,29 +153,20 @@ assert train_dataset
 assert valid_dataset
 
 # Model
-num_classes = len(target_classes)
-
 net = load_model(num_classes=num_classes,
                  fpn_level=5,
-                 basenet=config['hyperparameters']['base'],
-                 is_pretrained_base=config['hyperparameters']['pre_base'],
-                 is_norm_reg_target=config['hyperparameters']['norm_reg_target'],
-                 centerness_with_loc=config['hyperparameters']['centerness_on_reg'],
+                 basenet=config['params']['base'],
+                 is_pretrained_base=config['params']['pre_base'],
+                 is_norm_reg_target=config['params']['norm_reg_target'],
+                 centerness_with_loc=config['params']['centerness_on_reg'],
                  is_train=True,
-                 do_freeze=config['hyperparameters']['freeze'])
+                 do_freeze=config['params']['freeze'])
 net = net.to(device)
 
 # print out net
-num_parameters = 0.
-for param in net.parameters():
-    sizes = param.size()
-
-    num_layer_param = 1.
-    for size in sizes:
-        num_layer_param *= size
-    num_parameters += num_layer_param
 print(net)
-print("num. of parameters : " + str(num_parameters))
+n_parameters = sum(p.numel() for p in net.parameters() if p.requires_grad)
+print('number of params:', n_parameters)
 
 # set data parallel
 if is_data_parallel is True:
@@ -143,29 +176,30 @@ if is_data_parallel is True:
 criterion = FocalLoss(num_classes=num_classes)
 
 # optimizer
-if config['hyperparameters']['optimizer'] == 'SGD':
-    optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=float(config['hyperparameters']['lr']), momentum=0.9, weight_decay=5e-4)
-elif config['hyperparameters']['optimizer'] == 'Adam':
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=float(config['hyperparameters']['lr']))
+if config['params']['optimizer'] == 'SGD':
+    optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=float(config['params']['lr']),
+                          momentum=0.9, weight_decay=5e-4)
+elif config['params']['optimizer'] == 'Adam':
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=float(config['params']['lr']))
 else:
     raise ValueError('not supported optimizer')
 
-# set warm-up
-if int(config['hyperparameters']['warmup_period']) > 0:
-    warmup_scheduler = lr_warmup.LinearWarmup(optimizer,
-                                              warmup_period=int(config['hyperparameters']['warmup_period']))
-else:
-    warmup_scheduler = None
+# # set warm-up
+# if int(config['params']['warmup_period']) > 0:
+#     warmup_scheduler = lr_warmup.LinearWarmup(optimizer,
+#                                               warmup_period=int(config['params']['warmup_period']))
+# else:
+#     warmup_scheduler = None
 
 # set lr scheduler
-if config['hyperparameters']['lr_patience'] > 0:
+if config['params']['lr_patience'] > 0:
     scheduler_for_lr = lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, mode='min', factor=0.1,
-                                                      patience=config['hyperparameters']['lr_patience'], verbose=True)
+                                                      patience=config['params']['lr_patience'], verbose=True)
 else:
     scheduler_for_lr = None
 
-if config['hyperparameters']['lr_multistep'] != 'None':
-    milestones = config['hyperparameters']['lr_multistep']
+if config['params']['lr_multistep'] != 'None':
+    milestones = config['params']['lr_multistep']
     milestones = milestones.split(', ')
     for iter_milestone in range(len(milestones)):
         milestones[iter_milestone] = int(milestones[iter_milestone])
@@ -193,10 +227,10 @@ if config['model']['model_path'] != 'None':
 print("optimizer : " + str(optimizer))
 if scheduler_for_lr is None:
     print("lr_scheduler : None")
-elif config['hyperparameters']['lr_patience'] > 0:
+elif config['params']['lr_patience'] > 0:
     print("lr_scheduler : [patience: " + str(scheduler_for_lr.patience) +
           ", gamma: " + str(scheduler_for_lr.factor) +"]")
-elif config['hyperparameters']['lr_multistep'] != 'None':
+elif config['params']['lr_multistep'] != 'None':
     tmp_str = "lr_scheduler : [milestones: "
     for milestone in scheduler_for_lr.milestones:
         tmp_str = tmp_str + str(milestone) + ', '
@@ -205,7 +239,7 @@ elif config['hyperparameters']['lr_multistep'] != 'None':
     tmp_str += ']'
     print(tmp_str)
 print("Size of batch : " + str(train_loader.batch_size))
-print("transform : " + str(transform))
+print("transform : " + str(train_transforms))
 print("num. train data : " + str(len(train_dataset)))
 print("num. valid data : " + str(len(valid_dataset)))
 print("num_classes : " + str(num_classes))
@@ -225,55 +259,55 @@ def train(epoch):
     global global_iter_train
 
     with torch.set_grad_enabled(True):
-        with autograd.detect_anomaly():
-            for batch_idx, (inputs, loc_targets, cls_targets, center_targets, _) in enumerate(train_loader):
-                inputs = inputs.to(device)
-                loc_targets = loc_targets.to(device)
-                cls_targets = cls_targets.to(device)
-                center_targets = center_targets.to(device)
+        # with autograd.detect_anomaly():
+        for batch_idx, (inputs, loc_targets, cls_targets, center_targets, _) in enumerate(train_loader):
+            inputs = inputs.to(device)
+            loc_targets = loc_targets.to(device)
+            cls_targets = cls_targets.to(device)
+            center_targets = center_targets.to(device)
 
-                optimizer.zero_grad()
-                loc_preds, cls_preds, center_preds = net(inputs)
+            optimizer.zero_grad()
+            loc_preds, cls_preds, center_preds = net(inputs)
 
-                loc_loss, cls_loss, center_loss, num_pos = \
-                    criterion(loc_preds, loc_targets, cls_preds, cls_targets, center_preds, center_targets)
+            loc_loss, cls_loss, center_loss, num_pos = \
+                criterion(loc_preds, loc_targets, cls_preds, cls_targets, center_preds, center_targets)
 
-                loss = (loc_loss + cls_loss) / num_pos + center_loss
-                loss.backward()
-                optimizer.step()
+            loss = (loc_loss + cls_loss) / num_pos + center_loss
+            loss.backward()
+            optimizer.step()
 
-                cur_lr = optimizer.param_groups[0]['lr']
+            cur_lr = optimizer.param_groups[0]['lr']
 
-                train_loss += loss.item()
-                print('[Train] epoch: %3d | iter: %4d | loc_loss: %.3f | cls_loss: %.3f | center_loss: %.3f | '
-                      'train_loss: %.3f | avg_loss: %.3f | num_pos: %4d | lr: %.8f'
-                      % (epoch, batch_idx, loc_loss.item(), cls_loss.item(), center_loss.item(),
-                         loss.item(), train_loss/(batch_idx+1), num_pos, cur_lr))
+            train_loss += loss.item()
+            print('[Train] epoch: %3d | iter: %4d | loc_loss: %.3f | cls_loss: %.3f | center_loss: %.3f | '
+                  'train_loss: %.3f | avg_loss: %.3f | num_pos: %4d | lr: %.8f'
+                  % (epoch, batch_idx, loc_loss.item(), cls_loss.item(), center_loss.item(),
+                     loss.item(), train_loss/(batch_idx+1), num_pos, cur_lr))
 
-                summary_writer.add_scalar('train/loc_loss', loc_loss.item(), global_iter_train)
-                summary_writer.add_scalar('train/cls_loss', cls_loss.item(), global_iter_train)
-                summary_writer.add_scalar('train/center_loss', center_loss.item(), global_iter_train)
-                summary_writer.add_scalar('train/train_loss', loss.item(), global_iter_train)
-                global_iter_train += 1
+            summary_writer.add_scalar('train/loc_loss', loc_loss.item(), global_iter_train)
+            summary_writer.add_scalar('train/cls_loss', cls_loss.item(), global_iter_train)
+            summary_writer.add_scalar('train/center_loss', center_loss.item(), global_iter_train)
+            summary_writer.add_scalar('train/train_loss', loss.item(), global_iter_train)
+            global_iter_train += 1
 
-                if config['hyperparameters']['lr_multistep'] != 'None':
-                    scheduler_for_lr.step()
+            if config['params']['lr_multistep'] != 'None':
+                scheduler_for_lr.step()
 
-                if warmup_scheduler is not None:
-                    warmup_scheduler.dampen()
+            # if warmup_scheduler is not None:
+            #     warmup_scheduler.dampen()
 
-            print('[Train] Saving..')
-            state = {
-                'net': net.state_dict(),
-                'loss': best_valid_loss,
-                'epoch': epoch,
-                'lr': config['hyperparameters']['lr'],
-                'classes': config['hyperparameters']['classes'],
-                'global_train_iter': global_iter_train,
-                'global_valid_iter': global_iter_valid,
-                'optimizer': optimizer
-            }
-            torch.save(state, os.path.join(config['model']['exp_path'], 'latest.pth'))
+        print('[Train] Saving..')
+        state = {
+            'net': net.state_dict(),
+            'loss': best_valid_loss,
+            'epoch': epoch,
+            'lr': config['params']['lr'],
+            'classes': config['params']['classes'],
+            'global_train_iter': global_iter_train,
+            'global_valid_iter': global_iter_valid,
+            'optimizer': optimizer
+        }
+        torch.save(state, os.path.join(config['model']['exp_path'], 'latest.pth'))
 
 
 # Valid
@@ -314,7 +348,7 @@ def valid(epoch):
             summary_writer.add_scalar('valid/valid_loss', loss.item(), global_iter_valid)
             global_iter_valid += 1
 
-    if config['hyperparameters']['lr_patience'] > 0:
+    if config['params']['lr_patience'] > 0:
         scheduler_for_lr.step(avg_valid_loss)
 
     # check whether better model or not
@@ -328,8 +362,8 @@ def valid(epoch):
             'net': net.state_dict(),
             'loss': best_valid_loss,
             'epoch': epoch,
-            'lr': config['hyperparameters']['lr'],
-            'classes': config['hyperparameters']['classes'],
+            'lr': config['params']['lr'],
+            'classes': config['params']['classes'],
             'global_train_iter': global_iter_train,
             'global_valid_iter': global_iter_valid,
             'optimizer': optimizer
@@ -339,7 +373,7 @@ def valid(epoch):
 
 
 if __name__ == '__main__':
-    for epoch in range(start_epoch, config['hyperparameters']['epoch'], 1):
+    for epoch in range(start_epoch, config['params']['epoch'], 1):
         train(epoch)
         valid(epoch)
     summary_writer.close()

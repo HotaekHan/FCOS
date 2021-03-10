@@ -1,17 +1,17 @@
 data:
   train: data/coco_trainval35k.json
   valid: data/coco_minival5k.json
-hyperparameters:
-  batch_size: 8
+params:
+  batch_size: 6
   optimizer: Adam
   loss: focal
-  lr: 1e-4
-  epoch: 1000
+  lr: 1e-5
+  epoch: 300
   lr_patience: -1
   lr_multistep: None
   random_seed: 3000
-  image_size: 256x512
-  classes: aeroplane|bicycle|bird|boat|bottle|bus|car|cat|chair|cow|diningtable|dog|horse|motorbike|person|pottedplant|sheep|sofa|train|tvmonitor
+  image_size: 640x640
+  classes: data/coco_classes.txt
   base: Res50
   pre_base: True
   num_crops: -1
@@ -19,13 +19,12 @@ hyperparameters:
   norm_reg_target: True
   centerness_on_reg: True
   cls_threshold: 0.05
-  do_aug: True
   radius: 0.6
   freeze: False
   warmup_period: -1
 model:
   model_path: None
-  exp_path: expr/pre_ex0
+  exp_path: /data/Expr/Projects/8_object_detection/fcos/coco_mini
   is_finetune: False
 cuda:
   using_cuda: True

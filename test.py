@@ -10,6 +10,9 @@ import sys
 import torch
 import torchvision.transforms as transforms
 
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
 # user-defined
 from models.fcos import load_model
 from datagen import jsonDataset
@@ -21,7 +24,7 @@ opt = parser.parse_args()
 
 config = utils.get_config(opt.config)
 
-cls_th = float(config['hyperparameters']['cls_threshold'])
+cls_th = float(config['params']['cls_threshold'])
 nms_th = 0.5
 
 output_dir = os.path.join(config['model']['exp_path'], 'results')
@@ -35,22 +38,24 @@ if torch.cuda.is_available() and not config['cuda']['using_cuda']:
 cuda_str = 'cuda:' + str(config['cuda']['gpu_id'])
 device = torch.device(cuda_str if config['cuda']['using_cuda'] else "cpu")
 
-transform = transforms.Compose([
-    transforms.ToTensor()
-])
-
-target_classes = config['hyperparameters']['classes'].split('|')
-img_size = config['hyperparameters']['image_size'].split('x')
+target_classes = utils.read_txt(config['params']['classes'])
+num_classes = len(target_classes)
+img_size = config['params']['image_size'].split('x')
 img_size = (int(img_size[0]), int(img_size[1]))
 
-num_classes = len(target_classes)
+bbox_params = A.BboxParams(format='pascal_voc', min_visibility=0.3)
+valid_transforms = A.Compose([
+    A.Resize(height=img_size[0], width=img_size[1], p=1.0),
+    A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, p=1.0),
+    ToTensorV2()
+], bbox_params=bbox_params, p=1.0)
 
 net = load_model(num_classes=num_classes,
                  fpn_level=5,
-                 basenet=config['hyperparameters']['base'],
+                 basenet=config['params']['base'],
                  is_pretrained_base=False,
-                 is_norm_reg_target=config['hyperparameters']['norm_reg_target'],
-                 centerness_with_loc=config['hyperparameters']['centerness_on_reg'],
+                 is_norm_reg_target=config['params']['norm_reg_target'],
+                 centerness_with_loc=config['params']['centerness_on_reg'],
                  is_train=False)
 net = net.to(device)
 net.eval()
@@ -71,19 +76,20 @@ for dataset_name in dataset_dict:
     os.makedirs(result_dir, exist_ok=True)
 
     dataset = jsonDataset(path=data_path, classes=target_classes,
-                          transform=transform,
+                          transform=valid_transforms,
                           input_image_size=img_size,
                           num_crops=-1,
-                          is_norm_reg_target=config['hyperparameters']['norm_reg_target'],
+                          is_norm_reg_target=config['params']['norm_reg_target'],
                           fpn_level=5,
-                          radius=float(config['hyperparameters']['radius']))
+                          radius=float(config['params']['radius']))
     assert dataset
     num_data = len(dataset)
-    batch_size = int(config['hyperparameters']['batch_size'])
+    batch_size = int(config['params']['batch_size'])
     data_loader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size,
         shuffle=False, num_workers=0,
-        collate_fn=dataset.collate_fn)
+        collate_fn=dataset.collate_fn,
+        pin_memory=True)
 
     with torch.set_grad_enabled(False):
         for batch_idx, (inputs, loc_targets, cls_targets, center_targets, paths) in enumerate(data_loader):
