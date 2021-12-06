@@ -1,15 +1,14 @@
 # python
 import os
 import argparse
-import random
-import numpy as np
-import shutil
 import cv2
 from tqdm import tqdm
 
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
 # pytorch
 import torch
-import torchvision.transforms as transforms
 
 # user-defined
 from models.fcos import load_model
@@ -23,7 +22,7 @@ opt = parser.parse_args()
 
 config = utils.get_config(opt.config)
 
-cls_th = float(config['hyperparameters']['cls_threshold'])
+cls_th = float(config['inference']['cls_threshold'])
 nms_th = 0.5
 
 output_dir = os.path.join(config['model']['exp_path'], 'results')
@@ -37,29 +36,38 @@ if torch.cuda.is_available() and not config['cuda']['using_cuda']:
 cuda_str = 'cuda:' + str(config['cuda']['gpu_id'])
 device = torch.device(cuda_str if config['cuda']['using_cuda'] else "cpu")
 
-transform = transforms.Compose([
-    transforms.ToTensor()
-])
+bbox_params = A.BboxParams(format='pascal_voc', min_visibility=0.3)
 
 is_resized = True
-target_classes = config['hyperparameters']['classes'].split('|')
-if isinstance(config['hyperparameters']['image_size'], str) == True:
-    img_size = config['hyperparameters']['image_size'].split('x')
+target_classes = utils.read_txt(config['params']['classes'])
+if isinstance(config['inference']['image_size'], str) == True:
+    img_size = config['inference']['image_size'].split('x')
     img_size = (int(img_size[0]), int(img_size[1])) # rows x cols
-    print('Image size(normalization): ' + config['hyperparameters']['image_size'])
+    print('Image size(normalization): ' + config['inference']['image_size'])
+
+    valid_transforms = A.Compose([
+        A.Resize(height=img_size[0], width=img_size[1], p=1.0),
+        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, p=1.0),
+        ToTensorV2()
+    ], bbox_params=bbox_params, p=1.0)
 else:
     img_size = None
     is_resized = False
     print('Do not normalize to image size')
 
+    valid_transforms = A.Compose([
+        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, p=1.0),
+        ToTensorV2()
+    ], bbox_params=bbox_params, p=1.0)
+
 num_classes = len(target_classes)
 
 net = load_model(num_classes=num_classes,
                  fpn_level=5,
-                 basenet=config['hyperparameters']['base'],
+                 basenet=config['params']['base'],
                  is_pretrained_base=False,
-                 is_norm_reg_target=config['hyperparameters']['norm_reg_target'],
-                 centerness_with_loc=config['hyperparameters']['centerness_on_reg'],
+                 is_norm_reg_target=config['params']['norm_reg_target'],
+                 centerness_with_loc=config['params']['centerness_on_reg'],
                  is_train=False)
 net = net.to(device)
 net.eval()
@@ -67,7 +75,7 @@ net.eval()
 data_encoder = DataEncoder(image_size=img_size,
                            num_classes=num_classes + 1,
                            fpn_level=5,
-                           is_norm_reg_target=config['hyperparameters']['norm_reg_target'])
+                           is_norm_reg_target=config['params']['norm_reg_target'])
 
 ckpt = torch.load(os.path.join(config['model']['exp_path'], 'best.pth'), map_location=device)
 weights = utils._load_weights(ckpt['net'])
@@ -98,12 +106,9 @@ with torch.set_grad_enabled(False):
         ori_cols = img.shape[1]
         if is_resized is False:
             img_size = (ori_rows, ori_cols)
-            if ori_cols > 3840:
-                ratio = ori_cols / ori_rows
-                img_size = (int(3840 * (1 / ratio)), 3840)
-                print(img_size)
         resized_img = cv2.resize(img, (img_size[1], img_size[0]))
-        x = transform(resized_img)
+        augmented = valid_transforms(image=img)
+        x = augmented['image']
         x = x.unsqueeze(0)
         x = x.to(device)
 
